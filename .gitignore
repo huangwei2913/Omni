@@ -1,0 +1,17 @@
+build/
+data/
+bunny/checkpoints-pretrain
+checkpoints-pretrain/
+/eval/
+bunny/__pycache__
+**/__pycache__/
+GQAVal/
+MMMU/
+SEED-Bench/
+checkpoints-finetune/
+checkpoints-stage3/
+dataassert/
+kernel_meta/
+tmpo2ivf29_/
+mmeanswers/
+bunny.egg-info/

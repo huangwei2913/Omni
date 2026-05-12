@@ -1,0 +1,34 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "bunny"
+version = "1.0"
+description = "A family of lightweight multimodal models."
+readme = "README.md"
+requires-python = ">=3.8"
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: Apache Software License",
+]
+dependencies = [
+    'accelerate', 'datasets', 'einops', 'einops-exts',
+    'fastapi', 'gradio', 'gradio_client', 'httpx', 'markdown2', 'numpy', 'openpyxl',
+    'peft', 'protobuf', 'pydantic', 'pypandoc', 'requests', 'scikit-learn', 'sentencepiece', 'shortuuid',
+    'tabulate', 'timm', 'tiktoken', 'tokenizers', 'torchvision', 'uvicorn'
+    # 注意：删掉了 torch, transformers, xformers
+    # 因为 torch 和 transformers 我们已经手动装好了适配版
+    # xformers 是 NVIDIA 专有的，NPU 无法运行，千万别装
+]
+
+
+[project.urls]
+"Homepage" = "https://github.com/BAAI-DCAI/Bunny"
+"Discussion" = "https://github.com/BAAI-DCAI/Bunny/issues"
+
+[tool.setuptools.packages.find]
+exclude = ["assets*", "benchmark*", "docs", "dist*", "playground*", "scripts*", "tests*"]
+
+[tool.wheel]
+exclude = ["assets*", "benchmark*", "docs", "dist*", "playground*", "scripts*", "tests*"]
