@@ -24,10 +24,17 @@ class ModelArguments:
     mm_mask_drop_ratio_upper: Optional[float] = field(default=None)
     mm_mask_drop_ratio_lower: Optional[float] = field(default=None)
     mm_dense_connector_type: Optional[str] = field(default='dci')  #密集投影层类型
-    vision_tower_dino: Optional[str] = field(default=None, metadata={"help": "DINOv2 子塔的权重路径"})
+    vision_tower_dino: Optional[str] = field(default=None, metadata={"help": "DINOv3 子塔的权重路径"})
     vision_tower_siglip: Optional[str] = field(
         default=None, metadata={"help": "SigLIP 子塔的权重路径，例如 google/siglip-so400m-patch14-384"}
     )
+    vision_tower_trocr: Optional[str] = field(
+        default=None, metadata={"help": "trocr 子塔的权重路径，例如 google/siglip-so400m-patch14-384"}
+    )
+    flux_decoder_path: Optional[str] = field(
+        default=None, 
+        metadata={"help": "FLUX 2.0 small decoder 预训练权重及 config.json 的绝对路径"}
+    )    
     compression_K: int = field(default=8, metadata={"help": "ToMe 算法的压缩倍率"})
     mm_hidden_size: int = field(default=1024)
 

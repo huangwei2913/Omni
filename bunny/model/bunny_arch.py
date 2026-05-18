@@ -7,6 +7,10 @@ from bunny.constants import IGNORE_INDEX, IMAGE_TOKEN_INDEX
 import os
 import glob
 import torch.nn as nn
+from .flux_decoder_core import FluxSmallDecoder
+from safetensors.torch import load_file
+import json
+
 
 local_rank = None
 def rank0_print(*args):
@@ -41,21 +45,18 @@ class BunnyMetaModel:
             else:
                 delay_load = True   # 第一阶段预训练，可以偷懒，等官方送货等用到图片再去拉取官方权重。
 
-            self.vision_tower = build_vision_tower(config, delay_load=delay_load, training_stage=self.stage)
-            self.vision_resampler = build_vision_resampler(config, delay_load=delay_load,training_stage=self.stage)
-            self.mm_projector = build_vision_projector(config, delay_load=delay_load, training_stage=self.stage)
+            self.vision_tower = build_vision_tower(config, delay_load=delay_load,training_stage=self.stage)
+            real_mm_hidden_size = getattr(self.vision_tower, 'hidden_size', 768)
+            config.mm_hidden_size = real_mm_hidden_size # 这个是视觉编码器的维度
+
+            self.vision_resampler = build_vision_resampler(config, delay_load=delay_load,
+                                                           training_stage=self.stage)
+            
+            self.mm_projector = build_vision_projector(config, delay_load=delay_load, 
+                                                       training_stage=self.stage)
             if getattr(config, 'continuous_training', False):
                 config.continuous_training = False         
         
-        self.recon_decoder = nn.Sequential(
-            nn.Linear(config.hidden_size, 1024),
-            nn.Unflatten(1, (64, 4, 4)), # 假设上采样起始分辨率
-            nn.ConvTranspose2d(64, 32, kernel_size=4, stride=2, padding=1), # 8x8
-            nn.ConvTranspose2d(32, 16, kernel_size=4, stride=2, padding=1), # 16x16
-            nn.ConvTranspose2d(16, 1, kernel_size=4, stride=2, padding=1),  # 32x32 的灰度重构/Mask
-            nn.Sigmoid()
-        )    
-
     #注意这里写法，其实不是获取命令行中的字符串
     def get_vision_tower(self):
         vision_tower = getattr(self, 'vision_tower', None)  #这只是从self对象拿到vision_tower属性（模型对象），如果是list则取第一个，否则原样返回
@@ -201,7 +202,7 @@ class BunnyMetaModel:
 
         # 3. 🧠 强制物理加载驱动
         if hasattr(vision_tower, 'load_model'):
-            print("⚡ [Power On] 正在从官方路径拉取 DINO/SigLIP 原始权重...")
+            print("⚡ [Power On] 正在从官方路径拉取混合塔原始权重...")
             vision_tower.load_model()
 
         # 4. 构建投影层 (Projector)
@@ -236,35 +237,67 @@ class BunnyMetaForCausalLM(ABC):
         return self.get_model().get_vision_tower()
     
     def encode_images(self, images):
-        #这里可以来控制,如果不是dynamic 
+        ##############################################################
+        #这里可以来控制,如果不是dynamic，上面这些被用于重构损失 
         vision_tower = self.get_model().get_vision_tower()
-
+        ###################################################
         rank = torch.distributed.get_rank() if torch.distributed.is_initialized() else 0
         if "AdaptiveConcatenationVisionTower" in str(type(vision_tower)):
             image_features, _ = vision_tower(images)
+            # 2. 🌟【调整位置】：挪到这里！此时视觉塔里的 current_raw_images 才是热腾腾的当前 Batch 数据！
+            if hasattr(vision_tower, "current_raw_images"):
+                self.get_model().pending_reconstruction_images = vision_tower.current_raw_images
+                # 🧼 顺手把视觉塔里的引用置空，防止两份指针同时指着原图，优化显存
+                vision_tower.current_raw_images = None
+
+            if hasattr(vision_tower, "combined_features"):
+                self.get_model().pending_combined_features = vision_tower.combined_features
+                # 🧼 顺手把视觉塔里的引用置空，防止两份指针同时指着原图，优化显存
+                vision_tower.combined_features = None
+
+            resampler = getattr(self.get_model(), 'vision_resampler', None)
+            if resampler is not None and "IdentityMap" not in str(type(resampler)):
+                # 把上万个冗余 Token 动态压缩到 1089 以内
+                # 打印压缩前的多视图特征海啸状态
+                if rank == 0:
+                    print(f"🌊 [Resampler 前] 原始多视图特征形状: {image_features.shape} | Device: {image_features.device} | Dtype: {image_features.dtype}")
+                resampler = resampler.to(device=image_features.device, dtype=image_features.dtype)
+                image_features = resampler(image_features)
+# 执行 Fovea 动态采样压缩
+                
+                # 🛠️ 联动修改：如果已经是 Tensor 则安心通关，如果是元组则解包，如果依然是 list 则进行连续化兜底
+                if isinstance(image_features, tuple):
+                    image_features = image_features[0]
+                    
+                if isinstance(image_features, list):
+                    # 确保全员连续
+                    image_features = [x.contiguous() for x in image_features]
+                    image_features = torch.stack(image_features, dim=0)
+                else:
+                    # 确保出厂的 Tensor 也是内存连续的
+                    image_features = image_features.contiguous()
+
+
+                # if isinstance(image_features, list):
+                #     image_features = torch.stack(image_features, dim=0)
+                # # 如果采样器连同某种 Loss 组成了元组返回，则进行解包
+                # elif isinstance(image_features, tuple):
+                #     image_features = image_features[0]
+                #     if isinstance(image_features, list):
+                #         image_features = torch.stack(image_features, dim=0)
+                # 打印压缩之后的紧凑特征状态
+                if rank == 0:
+                    print(f"🎯 [Resampler 后] 压缩后紧凑特征形状: {image_features.shape} | 成功把有效图片 Token 数压制到: {image_features.shape[1]}")
+
             image_features = self.get_model().mm_projector(image_features)
             return image_features
         mm_resampler_type = getattr(self.config, 'mm_resampler_type', None)
 
-        if mm_resampler_type is None:  # 常规处理模式, 这里我们希望的
-            image_features, _ = self.get_model().get_vision_tower()(images)  #这里是希望能返回中间层特征
-            image_features = self.get_model().mm_projector(image_features)
-            return image_features
-        else:  #如果是那几个
-            if mm_resampler_type=='dynamic_compressor':
-                image_features, image_size, _ = self.get_model().get_vision_tower()(images)
-                image_features,_ = self.get_model().vision_resampler(image_features, forward_type='image',image_size=image_size)
-                image_features = self.get_model().mm_projector(image_features)
-                return image_features
-            else:
-                image_features = self.get_model().get_vision_tower()(images)
-                image_features = self.get_model().vision_resampler(image_features)
-                image_features = self.get_model().mm_projector(image_features)
-                return image_features    
-                
+
     def prepare_inputs_labels_for_multimodal(
         self, input_ids, position_ids, attention_mask, past_key_values, labels, images
     ):
+        
         # 1. 基础检查：推理阶段的流式生成直接跳过逻辑
         vision_tower = self.get_vision_tower()
         if vision_tower is None or images is None or input_ids.shape[1] == 1:
@@ -319,32 +352,6 @@ class BunnyMetaForCausalLM(ABC):
         # 改 -200 为 0 防止嵌入层报错
         input_ids_temp = input_ids.clone() 
         input_ids_temp[input_ids_temp == IMAGE_TOKEN_INDEX] = 0
-        # --- [玛德，这就给你打印 input_ids_temp] ---
-# # --- 强制打印调试法 ---
-#         import torch.distributed as dist
-#         # 获取当前进程的 rank，不依赖那个可能没赋值成功的 local_rank
-#         try:
-#             curr_rank = dist.get_rank()
-#         except:
-#             curr_rank = 0 # 非分布式模式
-
-#         if curr_rank == 0:
-#             # 使用内置 print，加上 flush=True 确保立即输出到屏幕
-#             print(f"\n📊 [input_ids_temp 监控]", flush=True)
-#             print(f"🔹 形状 (Shape): {input_ids_temp.shape}", flush=True)
-            
-#             # 看看第一条数据前 100 个 token
-#             sample_0 = input_ids_temp[0, :100].tolist()
-#             print(f"🔹 样本 0 前 100 个内容: {sample_0}", flush=True)
-            
-#             # 统计 0 的个数
-#             num_zeros = (input_ids_temp == 0).sum().item()
-#             print(f"🔹 当前 Batch 中 Token '0' (原-200) 的总数: {num_zeros}", flush=True)
-            
-#             # 顺便确认视觉特征有没有货
-#             if len(image_features) > 0:
-#                 print(f"📸 视觉特征已就绪，当前组数: {len(image_features)}", flush=True)
-#             print("-" * 40, flush=True)
 
         # 去掉 Padding，转为变长列表，准备缝合
         input_ids_list = [cur_input_ids[cur_mask] for cur_input_ids, cur_mask in zip(input_ids, attention_mask)]
@@ -452,5 +459,15 @@ class BunnyMetaForCausalLM(ABC):
             # 留出更大的余量给后面的 Transformer 层计算。
             new_input_embeds = torch.clamp(new_input_embeds, min=-4096.0, max=4096.0)
 
+
+        # 🔮 [断点 2] 监控多模态拼接完成、即将送入 LLM 时的状态
+        if labels is not None:
+            print(f"🔮 [模型内部流转] 多模态拼接后 labels 的当前 SeqLen: {labels.shape[1]}")
+            
+            internal_valid_tokens = (labels != -100).sum().item()
+            print(f"🔮 [模型内部流转] 准备送入 LLM 的有效计算 Loss 的 Token 数: {internal_valid_tokens}")
+            
+            if internal_valid_tokens == 0:
+                print(f"⚠️ 警告：有效 Labels 在此处已被洗掉！检查上方是否有类似 [:, :max_len] 或针对 modalities 的截断逻辑。")  
         return None, position_ids, attention_mask, past_key_values, new_input_embeds, new_labels_padded
 

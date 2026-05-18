@@ -3,7 +3,9 @@ import copy
 from dataclasses import dataclass, field
 import json
 from typing import Dict, Sequence, Optional, List
-
+import numpy as np
+import torch
+from PIL import Image
 import torch
 import transformers
 from torch.utils.data import Dataset
@@ -86,16 +88,14 @@ def preprocess(
         # 带有 <img_content> 和 Image 1: ... 的文本了
         conversations.append(conv.get_prompt())
 
-        # if not torch.distributed.is_initialized() or torch.distributed.get_rank() == 0:
-        #     if i == 0: # 只打印这批数据的第一个样本，防止刷屏
-        #         print("\n" + "👁️"*20)
-        #         print("【DEBUG 1: 原始 Prompt 模板长这样】")
-        #         print("请仔细检查里面是 USER: 还是 <|user|>，以及有没有特殊的 System Prompt。")
-        #         print("-" * 40)
-        #         print(repr(conv.get_prompt())) # 用 repr 打印，连 \n 都能显示出来
-        #         print("👁️"*20 + "\n")
-
-
+        if not torch.distributed.is_initialized() or torch.distributed.get_rank() == 0:
+            if i == 0: # 只打印这批数据的第一个样本，防止刷屏
+                print("\n" + "👁️"*20)
+                print("【DEBUG 1: 原始 Prompt 模板长这样】")
+                print("请仔细检查里面是 USER: 还是 <|user|>，以及有没有特殊的 System Prompt。")
+                print("-" * 40)
+                print(repr(conv.get_prompt())) # 用 repr 打印，连 \n 都能显示出来
+                print("👁️"*20 + "\n")
 
     # Tokenize 逻辑
     if has_image:
@@ -114,6 +114,19 @@ def preprocess(
     
     # Mask 掉 User 的提问，只训练 Assistant 的回答
     sep = conv.sep + conv.roles[1] + ": "
+    # =========================================================
+    # 🔍 【模板对准质检仪】 插入在此处
+    # =========================================================
+    if not torch.distributed.is_initialized() or torch.distributed.get_rank() == 0:
+        print("\n" + "🎯" * 15 + " [数据特征对齐质检] " + "🎯" * 15)
+        print(f" 拼接使用的角色分割符 sep: {repr(sep)}")
+        print(f" 轮次分割符 conv.sep2: {repr(conv.sep2)}")
+        print(f" 第一个样本生成的完整对话全貌 (repr 模式):")
+        print("-" * 50)
+        print(repr(conversations[0]))
+        print("-" * 50 + "\n")
+    # =========================================================
+
     for conversation, target in zip(conversations, targets):
         total_len = int(target.ne(tokenizer.pad_token_id).sum())
         rounds = conversation.split(conv.sep2)
@@ -180,21 +193,79 @@ def preprocess(
     return dict(input_ids=input_ids, labels=targets)
 
 
-#获取乐高图的切片
-def get_v17_lego_crops(raw_image, target_sz=378, canvas_sz=714):
+def preprocess_multiview_mask(mask_path, target_sz=384, canvas_sz=726):
     """
-    统一的 V17 乐高切片逻辑：自动适配任何比例
+    【保持长宽比与补白对齐技术】
+    确保二值图与原始图像在逻辑缩放时保持完全一致的几何流形，防止目标错位。
+    """
+    if not os.path.exists(mask_path):
+        return torch.zeros((6, 1, target_sz, target_sz), dtype=torch.float32)
+        
+    mask = Image.open(mask_path).convert('L')
+    
+    # 🌟 1. 仿照标准图像处理器的 Letterbox / Padding 逻辑：保持长宽比缩放到 canvas_sz
+    # 找出缩放比例
+    w, h = mask.size
+    scale = canvas_sz / max(w, h)
+    new_w, new_h = int(w * scale), int(h * scale)
+    
+    # 最近邻缩放，防止二值边缘产生过渡灰度
+    mask_resized = mask.resize((new_w, new_h), Image.NEAREST)
+    
+    # 创建一块纯黑的 726x726 正方形画布
+    mask_canvas = Image.new('L', (canvas_sz, canvas_sz), 0)
+    # 将缩放后的掩码居中贴在画布上（确保与标准 ImageProcessor 居中补白对齐）
+    mask_canvas.paste(mask_resized, ((canvas_sz - new_w) // 2, (canvas_sz - new_h) // 2))
+    
+    # 🌟 2. 执行标准的 6 视图裁剪
+    low = 0
+    high = canvas_sz - target_sz
+    mid = (canvas_sz - target_sz) // 2
+    
+    crop_coors = [
+        None,                 # View 0
+        (low, low),           # View 1
+        (high, low),          # View 2
+        (low, high),          # View 3
+        (high, high),         # View 4
+        (mid, mid)            # View 5
+    ]
+    
+    mask_list = []
+    
+    # View 0: 全局图（同样采用保持长宽比缩放）
+    g_scale = target_sz / max(w, h)
+    g_w, g_h = int(w * g_scale), int(h * g_scale)
+    g_resized = mask.resize((g_w, g_h), Image.NEAREST)
+    view_0 = Image.new('L', (target_sz, target_sz), 0)
+    view_0.paste(g_resized, ((target_sz - g_w) // 2, (target_sz - g_h) // 2))
+    mask_list.append(torch.from_numpy(np.array(view_0)).float() / 255.0)
+    
+    # View 1~5: 局部滑窗裁剪
+    for v in range(1, 6):
+        x_start, y_start = crop_coors[v]
+        crop_box = (x_start, y_start, x_start + target_sz, y_start + target_sz)
+        view_v = mask_canvas.crop(crop_box)
+        mask_list.append(torch.from_numpy(np.array(view_v)).float() / 255.0)
+        
+    return torch.stack(mask_list).unsqueeze(1).contiguous()
+
+#获取乐高图的切片，为了保持和解码器一样的384, 我们直接修改这个地方
+def get_v17_lego_crops(raw_image, target_sz=384, canvas_sz=726):
+    """
+    更新后的 V17 乐高切片逻辑：严格适配 FLUX.2 解码器的 384x384 物理空间约束
+    target_sz: 384 (确保 Latent 尺寸为 384 / 8 = 48)
+    canvas_sz: 726 (保持原有十字咬合的空间分布比例)
     """
     w, h = raw_image.size
     aspect_ratio = h / w if w > 0 else 1
 
     # --- 情况 1：极细长图 (手机截图类) ---
     if aspect_ratio > 1.6 or aspect_ratio < 0.6:
-        # 这种情况下，我们沿长边进行 1x5 的线性排布
         main_dim = h if aspect_ratio > 1.6 else w
         cross_dim = w if aspect_ratio > 1.6 else h
         
-        # 宽度/高度对齐到 target_sz
+        # 宽度/高度对齐到 384
         scale = target_sz / cross_dim
         new_main = int(main_dim * scale)
         
@@ -215,10 +286,10 @@ def get_v17_lego_crops(raw_image, target_sz=378, canvas_sz=714):
 
     # --- 情况 2：标准比例 (十字咬合类) ---
     else:
-        # 也就是你最认可的 V17 四角+中心模式
+        # 基于 726 大画布的四角+中心模式
         scale = canvas_sz / max(w, h)
         curr_w, curr_h = int(w * scale), int(h * scale)
-        resized_714 = raw_image.resize((curr_w, curr_h), Image.Resampling.LANCZOS)
+        resized_726 = raw_image.resize((curr_w, curr_h), Image.Resampling.LANCZOS)
 
         def get_coords(cur, tgt):
             return (0, 0) if cur <= tgt else (0, cur - tgt)
@@ -227,11 +298,12 @@ def get_v17_lego_crops(raw_image, target_sz=378, canvas_sz=714):
         y_low, y_high = get_coords(curr_h, target_sz)
         x_mid, y_mid = (curr_w - target_sz) // 2, (curr_h - target_sz) // 2
 
+        # 这里的坐标是在 726 虚拟大画布坐标系下的绝对像素位置
         coords = [(x_low, y_low), (x_high, y_low), (x_low, y_high), (x_high, y_high), (x_mid, y_mid)]
         
         crops = []
         for lx, ly in coords:
-            crop = resized_714.crop((lx, ly, lx + target_sz, ly + target_sz))
+            crop = resized_726.crop((lx, ly, lx + target_sz, ly + target_sz))
             if crop.size != (target_sz, target_sz):
                 # 最后的补白防线
                 pad = Image.new('RGB', (target_sz, target_sz), (122, 122, 122))
@@ -239,7 +311,6 @@ def get_v17_lego_crops(raw_image, target_sz=378, canvas_sz=714):
                 crop = pad
             crops.append(crop)
         return crops
-
 
 
 Image.MAX_IMAGE_PIXELS = None 
@@ -253,7 +324,7 @@ class LazySupervisedDataset(Dataset):
         self.tokenizer = tokenizer
         self.data_args = data_args
         self.num_image_tokens = getattr(data_args, 'mm_vision_tokens', 365)
-        MAX_SEQ_LEN = 2048  # 强制硬编码 2048，确保不溢出
+        MAX_SEQ_LEN = 4096  # 强制硬编码 2048，确保不溢出
         # --- 这里的逻辑是关键 ---
         if list_data_dict is not None:
             # 如果外部传了切分好的名单（train_list 或 val_list），直接用
@@ -361,12 +432,15 @@ class LazySupervisedDataset(Dataset):
     def __len__(self):
         return len(self.list_data_dict)
 
-
+    #  raw_entry - 原始数据...........: {'id': '2029391073', 'image': '2029391073.jpg', 
+    # 'conversations': [{'from': 'human', 'value': "<image>\nPresent a compact description of 
+    # the photo's key features."}, {'from': 'gpt', 'value': 'Property for Auction at Taman Nirwana'}]}
     def __getitem__(self, i) -> Dict[str, torch.Tensor]:
         raw_entry = self.list_data_dict[i]
+        #rank0_print(f"  raw_entry - 原始数据...........: {raw_entry}")
         dialog_list = copy.deepcopy(raw_entry['conversations'])
         sources = [dialog_list] # 包装成 [source]
-        
+
         # 1. 文本与多模态占位符处理
         has_image = 'image' in raw_entry
         if has_image:
@@ -405,7 +479,7 @@ class LazySupervisedDataset(Dataset):
             image_file = raw_entry['image']
             image_folder = self.data_args.image_folder
             processor = self.data_args.image_processor
-            target_sz = 378
+            target_sz = 384
 
             if os.path.isabs(image_file) and os.path.exists(image_file):
                 img_path = image_file
@@ -421,7 +495,7 @@ class LazySupervisedDataset(Dataset):
             try:
                 raw_image = Image.open(img_path).convert('RGB')
                 global_img = ImageOps.pad(raw_image, (target_sz, target_sz), color=(122, 122, 122))
-                crops = get_v17_lego_crops(raw_image, target_sz=378)
+                crops = get_v17_lego_crops(raw_image, target_sz=384)
                 six_images = [global_img] + crops
                 sub_image_dict = processor.preprocess(six_images, return_tensors='pt')
                 # 统一 Key 为 'image' (单数)，与 Collator 逻辑对齐
@@ -431,8 +505,34 @@ class LazySupervisedDataset(Dataset):
                 rank0_print(f"🚨 图片处理失败: {img_path}, 错误: {e}")
                 data_dict['image'] = torch.zeros(6, 2, 3, target_sz, target_sz)
         else:
-            data_dict['image'] = torch.zeros(6, 2, 3, 378, 378)
+            data_dict['image'] = torch.zeros(6, 2, 3, 384, 384)
         
+
+        #####当在我们的样本中还没有object_mask的时候
+        if 'object_mask' in raw_entry and raw_entry['object_mask'] is not None:
+            # 严格捞出来，赋值给 data_dict 的 'bbox' 键，以便后面 Collator 统一收割
+            mask_file = raw_entry['object_mask']
+            mask_path = os.path.join(image_folder, "..", mask_file)
+            gt_masks = preprocess_multiview_mask(mask_path)
+        else:
+            # 如果当前样本没有定位任务（比如是普通的图文问答），我们显式赋值为 None，通知 Collator 走防错流程
+            #rank0_print(f"🚮 样本 {i}: 中没有bbox.......................")
+            gt_masks = torch.zeros((6, 1, 384, 384), dtype=torch.float32)     
+        
+        data_dict['gt_masks'] = gt_masks
+        # =================================================================
+        # 🌟 重点核心：在这里把原图对应的物理目标 BBox 赋值进去, 后面在准备样本的时候，可以加进去
+        # =================================================================
+        # 检查原始的 JSON 数据字典（sources[0] 或 self.list_data_dict[i]）里有没有包含 'bbox'
+        # 预期您在标注 JSON 里的数据格式为: "bbox": [x_min, y_min, x_max, y_max] (全是 0~1 的归一化浮点数)
+        # if 'bbox' in raw_entry and raw_entry['bbox'] is not None:
+        #     # 严格捞出来，赋值给 data_dict 的 'bbox' 键，以便后面 Collator 统一收割
+        #     data_dict['bbox'] = raw_entry['bbox']  # 这会是一个形如 [0.12, 0.34, 0.56, 0.78] 的 Python 列表
+        # else:
+        #     # 如果当前样本没有定位任务（比如是普通的图文问答），我们显式赋值为 None，通知 Collator 走防错流程
+        #     #rank0_print(f"🚮 样本 {i}: 中没有bbox.......................")
+        #     data_dict['bbox'] = None
+
         return data_dict
 
 # ---------------------------------------------------------
@@ -481,7 +581,7 @@ class DataCollatorForSupervisedDataset(object):
             attention_mask=input_ids.ne(self.tokenizer.pad_token_id),
         )
 
-        # 5. 图像堆叠处理 [Batch, 6, 2, 3, 378, 378]
+        # 5. 图像堆叠处理 [Batch, 6, 2, 3, 384, 384]
         if 'image' in instances[0]:
             images = [instance['image'] for instance in instances]
             if all(x is not None and x.shape == images[0].shape for x in images):
@@ -489,10 +589,47 @@ class DataCollatorForSupervisedDataset(object):
             else:
                 batch['images'] = images
 
-        # =================================================================
-        # 🔍 深度调试区 (修复了 RuntimeError 问题)
-        # =================================================================
-        
+        # 🌟【全新注入：组装分布式多视图二值掩码 Batch】
+        if 'gt_masks' in instances[0]:
+            gt_masks = [instance['gt_masks'] for instance in instances]
+            # 将 List 的 [6, 1, 384, 384] 叠成 [B, 6, 1, 384, 384]
+            batch['gt_masks'] = torch.stack(gt_masks)
+
+        try:
+            rank = torch.distributed.get_rank()
+        except Exception:
+            rank = 0
+
+        if rank == 0:
+            print("\n" + "🚀" * 10 + " [DataCollator 实时透视面板] " + "🚀" * 10)
+            print(f"📦 当前 Batch 包含样本数 (Batch Size): {len(instances)}")
+            print(f"📊 组装完毕的 batch['gt_masks'] 形状: {batch['gt_masks'].shape}")
+            
+            print("\n🔬 [精细采样：窥探 instances 内部到底长啥样？]")
+            # 抽查打印这批 batch 里的第一个样本结构，展示其拥有的所有字典键
+            first_ins = instances[0]
+            print(f"  - 样本字典包含的全部键 (Keys): {list(first_ins.keys())}")
+            print(f"  - 文本 Token 数量 (input_ids 长度): {len(first_ins['input_ids'])}")
+            
+            # 如果包含文本，打印前 5 个 Token ID 作为核验
+            if 'input_ids' in first_ins:
+                print(f"  - 头部 Token ID 样例: {first_ins['input_ids'][:5].tolist()}")
+                
+            # 专门观察这个 instance 字典里的 bbox 原貌
+            if 'gt_masks' in first_ins:
+                #print(f"  - 该 instance 字典里挂载的原始 gt_mask 值: {first_ins['gt_mask']}")
+                pass
+            else:
+                print("  - ⚠️ 警告：该 instance 字典内部完全没有 'gt_masks' 这个 Key！")
+                
+            # 专门观察图像张量在 instance 里的物理状态
+            if 'image' in first_ins and first_ins['image'] is not None:
+                print(f"  - 携带的图像 Tensor 形状 (Shape): {first_ins['image'].shape}")
+            else:
+                print("  - 携带的图像状态: None (当前为纯文本样本)")
+                
+            print("🚀" * 32 + "\n")
+
         # [检查 A]：截断导致的 "全 -100" 风险
         # 计算每一行有多少个有效 label (即不等于 -100 的个数)
         # 使用 .long() 确保类型安全，使用 .tolist() 转为 Python 列表，彻底避免 Tensor Boolean Error
@@ -537,17 +674,18 @@ class DataCollatorForSupervisedDataset(object):
 
 
         # # --- 🚀 终极监控点 ---
-        # if not torch.distributed.is_initialized() or torch.distributed.get_rank() == 0:
-        #     #print("\n" + "🚚" * 10)
-        #     #print("【DataCollator 发货质检..............................................】")
-        #     if 'images' in batch:
-        #         print(f"   - 图像批次维度 (Images Shape): {batch['images'].shape}")
-        #         # 预期应该是 [Batch, 6, 2, 3, 378, 378]
-        #     if 'input_ids' in batch:
-        #         print(f"   - 文本批次维度 (Input_ids Shape): {batch['input_ids'].shape}")
-        #         # 这里的 SeqLen 应该是这个 Batch 里最长样本的长度
-        #     print("🚚" * 10 + "\n")
-
+        if not torch.distributed.is_initialized() or torch.distributed.get_rank() == 0:
+            if 'images' in batch:
+                print(f"   - 图像批次维度 (Images Shape): {batch['images'].shape}")
+                # 预期应该是 [Batch, 6, 2, 3, 384, 384]
+            if 'input_ids' in batch:
+                print(f"   - 文本批次维度 (Input_ids Shape): {batch['input_ids'].shape}")
+                # 这里的 SeqLen 应该是这个 Batch 里最长样本的长度
+                print("🚚" * 10 + "\n")
+            # 🔍 [断点 1] 检查 DataCollator 刚打包好时，Labels 是否正常
+            if 'labels' in batch:
+                valid_label_tokens = (batch['labels'] != -100).sum().item()
+                print(f"🔍 [DataCollator 出厂质检] 当前 Batch 有效计算 Loss 的 Token 数: {valid_label_tokens}")            
 
         return batch
 

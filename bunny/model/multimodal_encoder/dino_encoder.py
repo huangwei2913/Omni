@@ -11,50 +11,12 @@ from dinov3.hub.backbones import dinov3_vits16, dinov3_vitb16, dinov3_vitl16, di
 from safetensors.torch import load_file  
 import math
 
-
-
 DINOv3_MODEL_FACTORIES = {
     "dinounet_s": dinov3_vits16,
     "dinounet_b": dinov3_vitb16,
     "dinounet_l": dinov3_vitl16,
     "dinounet_7b": dinov3_vit7b16,
 }
-
-DINOv3_MODEL_INFO = {
-    "dinounet_s": {"embed_dim": 384, "depth": 12, "num_heads": 6, "params": "~22M"},
-    "dinounet_b": {"embed_dim": 768, "depth": 12, "num_heads": 12, "params": "~86M"},
-    "dinounet_l": {"embed_dim": 1024, "depth": 24, "num_heads": 16, "params": "~300M"},
-    "dinounet_7b": {"embed_dim": 4096, "depth": 40, "num_heads": 32, "params": "~7B"},
-}
-
-DINOv3_INTERACTION_INDEXES = {
-    "dinounet_s": [2, 5, 8, 11],
-    "dinounet_b": [2, 5, 8, 11],
-    "dinounet_l": [4, 11, 17, 23],
-    "dinounet_7b": [9, 19, 29, 39],
-}
-
-# def load_dinov3_model(model_name, pretrained_path):
-#     model_factory = DINOv3_MODEL_FACTORIES[model_name]
-#     model = model_factory(pretrained=False)
-    
-#     # 动态拼接 safetensors 路径
-#     st_path = os.path.join(pretrained_path, "model.safetensors")
-    
-#     if os.path.exists(st_path):
-#         print(f"Loading weights from {st_path}")
-#         sd = load_file(st_path)
-#         print("CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC\n")
-#         print(sd.keys())
-#         # 注意：这里要确保 key 对齐，如果不一致需要处理
-#         model.load_state_dict(sd, strict=False)
-#     else:
-#         print(f"Warning: {st_path} not found, loading default weights.")
-#         model = model_factory(pretrained=True)
-#     return model
-
-
-
 import os
 import torch
 from safetensors.torch import load_file
@@ -162,7 +124,7 @@ def load_manual_processor(config_path):
     mean = config.get("image_mean", [0.485, 0.456, 0.406]) #
     std = config.get("image_std", [0.229, 0.224, 0.225])   #
     rescale = config.get("rescale_factor", 1/255.0)       #
-    size = config.get("size", {"height": 224, "width": 224}) #
+    size = config.get("size", {"height": 384, "width": 384}) #
 
     # 构建 torchvision 流程
     # 注意：在 CoBunny 实验中，你之前测试 337*337 成功过，可以根据需求调整 size
@@ -202,12 +164,10 @@ class DinoVisionTower(BaseVisionTower):
         print(f"🎨 [DinoVisionTower] 成功识别training_stage: {self.training_stage}")
         self.delay_load = kwargs.get('delay_load', False) 
         print(f"🎨 [DinoVisionTower] 成功识别delay_load: {self.delay_load}")   
-        # 混合编码器对齐关键参数
         self.target_grid_size = getattr(args, "mm_vision_grid_size", 24)
         self.target_N = self.target_grid_size * self.target_grid_size
         self._hidden_size = 768  # 这里的 hidden_size 指 Backbone 输出维度
         self.target_embed_dim = self._hidden_size # 内部投影目标维度
-        
         self.pretrained_path = getattr(args, "dinov3_pretrained_path", "/data/WorkSpace/models/dinov3-vitb16-pretrain-lvd1689m")
 
         # 2. Config 信息预加载（确保 delay_load 模式下属性依然可用）
@@ -241,8 +201,7 @@ class DinoVisionTower(BaseVisionTower):
             self.vision_tower = load_dinov3_model(self.model_name, self.pretrained_path)
         
         self.vision_tower.to(device=self.device, dtype=torch.float16)
-
-        
+  
         CONFIG_FILE = os.path.join(self.pretrained_path, 'preprocessor_config.json')
         self.image_processor = load_manual_processor(CONFIG_FILE)
         #self.image_processor = AutoImageProcessor.from_pretrained(self.vision_tower_name)
@@ -295,7 +254,9 @@ class DinoVisionTower(BaseVisionTower):
         if self._num_patches_cached is None:
             self._num_patches_cached = self.target_N
 
-        return aligned_layers[-1], all_intermediate_features
+        #返回的影像张量是 [B*6, 3, 378, 378] all_intermediate_features的张量是[B,577*N, C]
+        #注意这里的N是层数，C
+        return images, all_intermediate_features
 
     # --- 必须保留的核心属性 ---
     
