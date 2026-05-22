@@ -90,12 +90,13 @@ def preprocess(
 
         if not torch.distributed.is_initialized() or torch.distributed.get_rank() == 0:
             if i == 0: # 只打印这批数据的第一个样本，防止刷屏
-                print("\n" + "👁️"*20)
-                print("【DEBUG 1: 原始 Prompt 模板长这样】")
-                print("请仔细检查里面是 USER: 还是 <|user|>，以及有没有特殊的 System Prompt。")
-                print("-" * 40)
-                print(repr(conv.get_prompt())) # 用 repr 打印，连 \n 都能显示出来
-                print("👁️"*20 + "\n")
+                # print("\n" + "👁️"*20)
+                # print("【DEBUG 1: 原始 Prompt 模板长这样】")
+                # print("请仔细检查里面是 USER: 还是 <|user|>，以及有没有特殊的 System Prompt。")
+                # print("-" * 40)
+                # print(repr(conv.get_prompt())) # 用 repr 打印，连 \n 都能显示出来
+                # print("👁️"*20 + "\n")
+                pass
 
     # Tokenize 逻辑
     if has_image:
@@ -118,13 +119,14 @@ def preprocess(
     # 🔍 【模板对准质检仪】 插入在此处
     # =========================================================
     if not torch.distributed.is_initialized() or torch.distributed.get_rank() == 0:
-        print("\n" + "🎯" * 15 + " [数据特征对齐质检] " + "🎯" * 15)
-        print(f" 拼接使用的角色分割符 sep: {repr(sep)}")
-        print(f" 轮次分割符 conv.sep2: {repr(conv.sep2)}")
-        print(f" 第一个样本生成的完整对话全貌 (repr 模式):")
-        print("-" * 50)
-        print(repr(conversations[0]))
-        print("-" * 50 + "\n")
+        # print("\n" + "🎯" * 15 + " [数据特征对齐质检] " + "🎯" * 15)
+        # print(f" 拼接使用的角色分割符 sep: {repr(sep)}")
+        # print(f" 轮次分割符 conv.sep2: {repr(conv.sep2)}")
+        # print(f" 第一个样本生成的完整对话全貌 (repr 模式):")
+        # print("-" * 50)
+        # print(repr(conversations[0]))
+        # print("-" * 50 + "\n")
+        pass
     # =========================================================
 
     for conversation, target in zip(conversations, targets):
@@ -601,34 +603,37 @@ class DataCollatorForSupervisedDataset(object):
             rank = 0
 
         if rank == 0:
-            print("\n" + "🚀" * 10 + " [DataCollator 实时透视面板] " + "🚀" * 10)
-            print(f"📦 当前 Batch 包含样本数 (Batch Size): {len(instances)}")
-            print(f"📊 组装完毕的 batch['gt_masks'] 形状: {batch['gt_masks'].shape}")
+            #print("\n" + "🚀" * 10 + " [DataCollator 实时透视面板] " + "🚀" * 10)
+            #print(f"📦 当前 Batch 包含样本数 (Batch Size): {len(instances)}")
+            #print(f"📊 组装完毕的 batch['gt_masks'] 形状: {batch['gt_masks'].shape}")
             
-            print("\n🔬 [精细采样：窥探 instances 内部到底长啥样？]")
+            #print("\n🔬 [精细采样：窥探 instances 内部到底长啥样？]")
             # 抽查打印这批 batch 里的第一个样本结构，展示其拥有的所有字典键
             first_ins = instances[0]
-            print(f"  - 样本字典包含的全部键 (Keys): {list(first_ins.keys())}")
-            print(f"  - 文本 Token 数量 (input_ids 长度): {len(first_ins['input_ids'])}")
+            #print(f"  - 样本字典包含的全部键 (Keys): {list(first_ins.keys())}")
+            #print(f"  - 文本 Token 数量 (input_ids 长度): {len(first_ins['input_ids'])}")
             
             # 如果包含文本，打印前 5 个 Token ID 作为核验
             if 'input_ids' in first_ins:
-                print(f"  - 头部 Token ID 样例: {first_ins['input_ids'][:5].tolist()}")
-                
+                #print(f"  - 头部 Token ID 样例: {first_ins['input_ids'][:5].tolist()}")
+                pass   
             # 专门观察这个 instance 字典里的 bbox 原貌
             if 'gt_masks' in first_ins:
                 #print(f"  - 该 instance 字典里挂载的原始 gt_mask 值: {first_ins['gt_mask']}")
                 pass
             else:
-                print("  - ⚠️ 警告：该 instance 字典内部完全没有 'gt_masks' 这个 Key！")
+                #print("  - ⚠️ 警告：该 instance 字典内部完全没有 'gt_masks' 这个 Key！")
+                pass
                 
             # 专门观察图像张量在 instance 里的物理状态
             if 'image' in first_ins and first_ins['image'] is not None:
-                print(f"  - 携带的图像 Tensor 形状 (Shape): {first_ins['image'].shape}")
+                #print(f"  - 携带的图像 Tensor 形状 (Shape): {first_ins['image'].shape}")
+                pass
             else:
-                print("  - 携带的图像状态: None (当前为纯文本样本)")
+                #print("  - 携带的图像状态: None (当前为纯文本样本)")
+                pass
                 
-            print("🚀" * 32 + "\n")
+            #print("🚀" * 32 + "\n")
 
         # [检查 A]：截断导致的 "全 -100" 风险
         # 计算每一行有多少个有效 label (即不等于 -100 的个数)
@@ -640,8 +645,8 @@ class DataCollatorForSupervisedDataset(object):
             if count == 0:
                 has_zero_label_sample = True
                 # 这是一个严重警告：说明截断太狠，把回答切没了
-                rank0_print(f"🚨 [严重警告] 样本 {i} 的有效 Labels 数量为 0！(全被截断或原本就没有回答)")
-                rank0_print(f"   - Input 长度: {len(instances[i]['input_ids'])} -> 截断后: {input_ids.shape[1]}")
+                #rank0_print(f"🚨 [严重警告] 样本 {i} 的有效 Labels 数量为 0！(全被截断或原本就没有回答)")
+                #rank0_print(f"   - Input 长度: {len(instances[i]['input_ids'])} -> 截断后: {input_ids.shape[1]}")
 
         # [检查 B]：Padding 互补逻辑验证 (抽查第一个样本)
         # 找到 input_ids 中所有 pad 的位置
@@ -670,27 +675,31 @@ class DataCollatorForSupervisedDataset(object):
         if 'images' in batch and isinstance(batch['images'], torch.Tensor):
              # 确保维度是 6 维
              if batch['images'].dim() != 6:
-                 rank0_print(f"⚠️ [图像维度警告] 期望 6 维，实际得到: {batch['images'].shape}")
+                 #rank0_print(f"⚠️ [图像维度警告] 期望 6 维，实际得到: {batch['images'].shape}")
+                 pass
 
 
         # # --- 🚀 终极监控点 ---
         if not torch.distributed.is_initialized() or torch.distributed.get_rank() == 0:
             if 'images' in batch:
-                print(f"   - 图像批次维度 (Images Shape): {batch['images'].shape}")
+                #print(f"   - 图像批次维度 (Images Shape): {batch['images'].shape}")
+                pass
                 # 预期应该是 [Batch, 6, 2, 3, 384, 384]
             if 'input_ids' in batch:
-                print(f"   - 文本批次维度 (Input_ids Shape): {batch['input_ids'].shape}")
+                #print(f"   - 文本批次维度 (Input_ids Shape): {batch['input_ids'].shape}")
                 # 这里的 SeqLen 应该是这个 Batch 里最长样本的长度
-                print("🚚" * 10 + "\n")
+                #print("🚚" * 10 + "\n")
+                pass
             # 🔍 [断点 1] 检查 DataCollator 刚打包好时，Labels 是否正常
             if 'labels' in batch:
                 valid_label_tokens = (batch['labels'] != -100).sum().item()
-                print(f"🔍 [DataCollator 出厂质检] 当前 Batch 有效计算 Loss 的 Token 数: {valid_label_tokens}")            
+                #print(f"🔍 [DataCollator 出厂质检] 当前 Batch 有效计算 Loss 的 Token 数: {valid_label_tokens}") 
+                pass           
 
         return batch
 
 def make_supervised_data_module(tokenizer, data_args) -> Dict:
-    rank0_print("📂 [Data] 正在读取数据名单...")
+    #rank0_print("📂 [Data] 正在读取数据名单...")
     
     # 1. 先读出原始的 list_data_dict (这是最轻量级的字符串列表)
     import json
@@ -705,7 +714,7 @@ def make_supervised_data_module(tokenizer, data_args) -> Dict:
     val_list = list_data_dict[:val_size]
     train_list = list_data_dict[val_size:]
 
-    rank0_print(f"📂 [Data] 名单切分完成: 训练集 {len(train_list)}, 验证集 {len(val_list)}")
+    #rank0_print(f"📂 [Data] 名单切分完成: 训练集 {len(train_list)}, 验证集 {len(val_list)}")
 
     # 3. 分别创建两个独立的 LazySupervisedDataset 实例
     # 修改你的 Dataset 类，让它支持直接传入 list_data 而不是只读路径

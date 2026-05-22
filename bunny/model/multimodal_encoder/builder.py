@@ -2,7 +2,6 @@ import os
 from .siglip.siglip_encoder import SiglipVisionTower
 from .clip.clip_encoder import CLIPVisionTower
 from .dino_encoder import DinoVisionTower
-from .midas_encoder import MiDaSVisionTower
 import logging
 from .oryx_vit import OryxViTWrapper
 from .AdaptiveConcatenationVisionTower import AdaptiveConcatenationVisionTower

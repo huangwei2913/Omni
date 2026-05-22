@@ -17,6 +17,9 @@ import warnings
 warnings.filterwarnings("ignore", message=".*torch.utils.checkpoint: please pass in use_reentrant.*")
 # 过滤掉关于 requires_grad=True 的那个警告
 warnings.filterwarnings("ignore", message=".*None of the inputs have requires_grad=True.*")
+warnings.filterwarnings("ignore", message=".*torch.utils.checkpoint: please pass in use_reentrant.*")
+warnings.filterwarnings("ignore", category=UserWarning, module="multiprocessing")
+
 
 local_rank = None
 def rank0_print(*args):

@@ -260,7 +260,8 @@ class BunnyMetaForCausalLM(ABC):
                 # 把上万个冗余 Token 动态压缩到 1089 以内
                 # 打印压缩前的多视图特征海啸状态
                 if rank == 0:
-                    print(f"🌊 [Resampler 前] 原始多视图特征形状: {image_features.shape} | Device: {image_features.device} | Dtype: {image_features.dtype}")
+                    #print(f"🌊 [Resampler 前] 原始多视图特征形状: {image_features.shape} | Device: {image_features.device} | Dtype: {image_features.dtype}")
+                    pass
                 resampler = resampler.to(device=image_features.device, dtype=image_features.dtype)
                 image_features = resampler(image_features)
 # 执行 Fovea 动态采样压缩
@@ -287,8 +288,8 @@ class BunnyMetaForCausalLM(ABC):
                 #         image_features = torch.stack(image_features, dim=0)
                 # 打印压缩之后的紧凑特征状态
                 if rank == 0:
-                    print(f"🎯 [Resampler 后] 压缩后紧凑特征形状: {image_features.shape} | 成功把有效图片 Token 数压制到: {image_features.shape[1]}")
-
+                    #print(f"🎯 [Resampler 后] 压缩后紧凑特征形状: {image_features.shape} | 成功把有效图片 Token 数压制到: {image_features.shape[1]}")
+                    pass
             image_features = self.get_model().mm_projector(image_features)
             return image_features
         mm_resampler_type = getattr(self.config, 'mm_resampler_type', None)
@@ -364,10 +365,11 @@ class BunnyMetaForCausalLM(ABC):
         total_image_placeholders = sum((x == IMAGE_TOKEN_INDEX).sum().item() for x in input_ids_list)
         
         if local_rank == 0:
-            print(f"🔍 [6D 缝合检查] 文本坑位: {total_image_placeholders}, 视觉特征块: {len(image_features)}")
+            #print(f"🔍 [6D 缝合检查] 文本坑位: {total_image_placeholders}, 视觉特征块: {len(image_features)}")
             if len(image_features) > 0:
-                 print(f"🔍 [特征维度] 单个块形状: {image_features[0].shape}") # 必须是 [365, 1024]
-
+                 #print(f"🔍 [特征维度] 单个块形状: {image_features[0].shape}") # 必须是 [365, 1024]
+                 pass
+                                        
         # --- 替换结束 ---
         # ------------------------------------
         # 5. 核心缝合逻辑：将 365 个 Token 塞进每一个 IMAGE_TOKEN_INDEX 位置
@@ -399,7 +401,9 @@ class BunnyMetaForCausalLM(ABC):
                     cur_feat = image_features[cur_image_idx]
                     # --- 添加以下打印信息 ---
                     if local_rank == 0:
-                         print(f"🚀 [物理注入] 样本 {batch_idx} 的第 {cur_image_idx} 组特征正在缝入第 {i} 个坑位")
+                         #print(f"🚀 [物理注入] 样本 {batch_idx} 的第 {cur_image_idx} 组特征正在缝入第 {i} 个坑位")
+                         pass
+
                     cur_image_idx += 1
                     
                     cur_new_input_embeds.append(cur_feat)
@@ -450,7 +454,8 @@ class BunnyMetaForCausalLM(ABC):
             # 第一步：物理检查与填充
             if torch.isnan(new_input_embeds).any() or torch.isinf(new_input_embeds).any():
                 if local_rank == 0:
-                    print("⚠️ [Warning] 捕获到 NaN/Inf，执行紧急数值置换...")
+                    #print("⚠️ [Warning] 捕获到 NaN/Inf，执行紧急数值置换...")
+                    pass
                 # 将异常值直接归零，防止污染整个 Batch
                 new_input_embeds = torch.nan_to_num(new_input_embeds, nan=0.0, posinf=4096.0, neginf=-4096.0)
             
@@ -462,12 +467,13 @@ class BunnyMetaForCausalLM(ABC):
 
         # 🔮 [断点 2] 监控多模态拼接完成、即将送入 LLM 时的状态
         if labels is not None:
-            print(f"🔮 [模型内部流转] 多模态拼接后 labels 的当前 SeqLen: {labels.shape[1]}")
+            #print(f"🔮 [模型内部流转] 多模态拼接后 labels 的当前 SeqLen: {labels.shape[1]}")
             
             internal_valid_tokens = (labels != -100).sum().item()
-            print(f"🔮 [模型内部流转] 准备送入 LLM 的有效计算 Loss 的 Token 数: {internal_valid_tokens}")
+            #print(f"🔮 [模型内部流转] 准备送入 LLM 的有效计算 Loss 的 Token 数: {internal_valid_tokens}")
             
             if internal_valid_tokens == 0:
-                print(f"⚠️ 警告：有效 Labels 在此处已被洗掉！检查上方是否有类似 [:, :max_len] 或针对 modalities 的截断逻辑。")  
+                #print(f"⚠️ 警告：有效 Labels 在此处已被洗掉！检查上方是否有类似 [:, :max_len] 或针对 modalities 的截断逻辑。")  
+                pass
         return None, position_ids, attention_mask, past_key_values, new_input_embeds, new_labels_padded
 

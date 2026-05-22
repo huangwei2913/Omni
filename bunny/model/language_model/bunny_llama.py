@@ -133,23 +133,24 @@ class BunnyLlamaForCausalLM(LlamaForCausalLM, BunnyMetaForCausalLM, GenerationMi
             )
 
         if rank == 0:
-            print("\n" + "🩺" * 20 + " [LLM 前向传播数值健康度质检] " + "🩺" * 20)
+            #print("\n" + "🩺" * 20 + " [LLM 前向传播数值健康度质检] " + "🩺" * 20)
             if labels is not None:
-                print(f"🧱 [LLM 门槛检查] 即将送入 super().forward 的 labels 形状: {labels.shape}, 有效 Token 数: {(labels != -100).sum().item()}")
-                print(f"🧱 [LLM 门槛检查] 即将送入 super().forward 的 inputs_embeds 形状: {inputs_embeds.shape}")
+                #print(f"🧱 [LLM 门槛检查] 即将送入 super().forward 的 labels 形状: {labels.shape}, 有效 Token 数: {(labels != -100).sum().item()}")
+                #print(f"🧱 [LLM 门槛检查] 即将送入 super().forward 的 inputs_embeds 形状: {inputs_embeds.shape}")
+                pass
             if labels is not None:
                 valid_tokens = (labels != -100).sum().item()
                 total_tokens = labels.numel()
-                print(f" 🟢 [Labels 质检] 有效计算 Loss 的 Token 数: {valid_tokens} / 总 Token 数: {total_tokens}")
+                #print(f" 🟢 [Labels 质检] 有效计算 Loss 的 Token 数: {valid_tokens} / 总 Token 数: {total_tokens}")
                 if valid_tokens == 0:
-                    print(" 🚨 [致命警告] 当前 Batch 的 labels 全是 -100！PyTorch 的 CrossEntropyLoss 必然会除以 0 导致 nan！")
-            
+                    #print(" 🚨 [致命警告] 当前 Batch 的 labels 全是 -100！PyTorch 的 CrossEntropyLoss 必然会除以 0 导致 nan！")
+                    pass
             if inputs_embeds is not None:
                 has_nan_embed = torch.isnan(inputs_embeds).any().item()
                 max_embed = inputs_embeds.abs().max().item()
-                print(f" 🟢🟢🟢🟢 [特征维度揭秘] inputs_embeds 形状vvvvvvvvvvvvv: {inputs_embeds.shape}")
-                print(f" 🟢 [Embeds 质检] 是否含 NaN: {has_nan_embed} | 最大绝对值: {max_embed:.4f}")
-            print("🩺" * 55 + "\n")
+                #print(f" 🟢🟢🟢🟢 [特征维度揭秘] inputs_embeds 形状vvvvvvvvvvvvv: {inputs_embeds.shape}")
+                #print(f" 🟢 [Embeds 质检] 是否含 NaN: {has_nan_embed} | 最大绝对值: {max_embed:.4f}")
+            #print("🩺" * 55 + "\n")
         # =========================================================       
         outputs = super().forward(
             input_ids=input_ids,
@@ -165,10 +166,10 @@ class BunnyLlamaForCausalLM(LlamaForCausalLM, BunnyMetaForCausalLM, GenerationMi
             cache_position=None
         )
         # 🔍 [断点 3B] 检查官方/基类 Llama 算完之后的 Loss 状态
-        if outputs.loss is not None:
-            print(f"🎯 [LLM 计算完成] 基类算出的原始 LM Loss 值为: {outputs.loss.item()}")
-        else:
-            print(f"🎯 [LLM 计算完成] ⚠️ 警告：super().forward 吐出来的 Loss 是 None！")
+        # if outputs.loss is not None:
+        #     print(f"🎯 [LLM 计算完成] 基类算出的原始 LM Loss 值为: {outputs.loss.item()}")
+        # else:
+        #     print(f"🎯 [LLM 计算完成] ⚠️ 警告：super().forward 吐出来的 Loss 是 None！")
         model_inner = self.get_model()
         # 检查寄存属性
         model_inner = self.get_model()
@@ -209,7 +210,7 @@ class BunnyLlamaForCausalLM(LlamaForCausalLM, BunnyMetaForCausalLM, GenerationMi
                 # 只有 Rank 0 负责面板汇报
                 if rank == 0:
                     base_lm_loss = outputs.loss.item()
-                    print(f"🚀🚀🚀 [Loss 融合成功] LM 原始 Loss: {base_lm_loss:.4f} | Recon Loss: {recon_loss.item():.4f}")
+                    #print(f"🚀🚀🚀 [Loss 融合成功] LM 原始 Loss: {base_lm_loss:.4f} | Recon Loss: {recon_loss.item():.4f}")
 
                 outputs.loss = outputs.loss + recon_loss_weight * recon_loss
 
