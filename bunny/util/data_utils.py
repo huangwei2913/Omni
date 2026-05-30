@@ -505,14 +505,14 @@ class LazySupervisedDataset(Dataset):
 
             except Exception as e:
                 rank0_print(f"🚨 图片处理失败: {img_path}, 错误: {e}")
-                data_dict['image'] = torch.zeros(6, 2, 3, target_sz, target_sz)
+                #data_dict['image'] = torch.zeros(6, 2, 3, target_sz, target_sz)
+                data_dict['image'] = torch.randn(6, 2, 3, target_sz, target_sz) * 1e-3
         else:
-            data_dict['image'] = torch.zeros(6, 2, 3, 384, 384)
-        
+            #data_dict['image'] = torch.zeros(6, 2, 3, 384, 384)
+            data_dict['image'] = torch.randn(6, 2, 3, 384, 384) * 1e-3
 
         #####当在我们的样本中还没有object_mask的时候
         if 'object_mask' in raw_entry and raw_entry['object_mask'] is not None:
-            # 严格捞出来，赋值给 data_dict 的 'bbox' 键，以便后面 Collator 统一收割
             mask_file = raw_entry['object_mask']
             mask_path = os.path.join(image_folder, "..", mask_file)
             gt_masks = preprocess_multiview_mask(mask_path)

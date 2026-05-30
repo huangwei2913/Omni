@@ -31,8 +31,8 @@ torchrun \
     --vision_tower_dino  /data/WorkSpace/models/dinov3-vitb16-pretrain-lvd1689m \
     --vision_tower_trocr /data/WorkSpace/models/trocr-base-str \
     --flux_decoder_path  /data/WorkSpace/models/FLUX.2-small-decoder \
-    --data_path /data/WorkSpace/datasets/Bunny/pretrain_dataset/subset_3000.json \
-    --image_folder /data/WorkSpace/datasets/Bunny/pretrain_dataset/images \
+    --data_path /data/WorkSpace/datasets/OCR-Synthetic/bunny_format/ocr_train_200k_strict.json \
+    --image_folder /data/WorkSpace/datasets/OCR-Synthetic/bunny_format \
     --mm_projector_type mlp2x_gelu \
     --mm_resampler_type FoveaIntentResampler \
     --tune_mm_mlp_adapter True \
@@ -47,7 +47,7 @@ torchrun \
     --learning_rate 2e-4 \
     --max_grad_norm 0.5 \
     --lr_scheduler_type "cosine" \
-    --logging_steps 10 \
+    --logging_steps 1 \
     --warmup_ratio 0.1 \
     --model_max_length 4096 \
     --gradient_checkpointing True \

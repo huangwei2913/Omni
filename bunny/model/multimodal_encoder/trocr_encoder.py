@@ -46,10 +46,9 @@ class TrOCRVisionTower(BaseVisionTower):
             # 【搭架子模式】：微调和推理时，我们只需要物理架构
             # 权重会由 BunnyMetaModel 后续通过全量 Checkpoint 注入
             print(f"🏗️ [TrOCRVisionTower 执行层] 身份: {self.training_stage } -> 模式: 仅构建物理架构 (Skeleton Only)")
-            encoder = ViTModel(ViTConfig())
+            encoder = ViTModel(ViTConfig(image_size=384))
             decoder = TrOCRForCausalLM(TrOCRConfig())
             model = VisionEncoderDecoderModel(encoder=encoder, decoder=decoder)
-            # 使用工厂函数直接创建架构，pretrained 设为 False
             self.vision_tower = encoder
         else:  #第一个阶段
             # 【官方加载模式】：预训练第一阶段（Stage 1）

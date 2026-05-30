@@ -35,6 +35,7 @@ class FluxProjectorGrid(nn.Module):
         # 展平特征: [B*6, 576, 6144]
         x = x.view(B_times_6, 576, -1) 
         
+        x = F.normalize(x, p=2, dim=-1)
         # 3. 运行极度稳健的全连接层投影 (在 bfloat16 下依然稳如泰山)
         # [B*6, 576, 6144] -> [B*6, 576, 32]
         x = self.proj(x)

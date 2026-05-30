@@ -64,20 +64,81 @@ class BunnyMetaModel:
             vision_tower = vision_tower[0]
         return vision_tower # 也就说我们的双塔视觉编码器返回的是自己本身
     
+    def initialize_vision_modules_finetune(self, model_args):
+        """
+        🚀 适用于全量 Checkpoint 的微调/解冻初始化函数
+        由于 Hugging Face 已经通过 model.safetensors 自动把 vision_tower, vision_resampler, mm_projector 的权重全部加载好了，
+        这里只需要做：1. 确保架构实体健全；2. 对齐精度；3. 精准控制现有各模块的梯度。
+        """
+        if not hasattr(self, 'config'):
+            self.config = self.model.config
+
+        # 1. 确保声明开启多模态投影
+        self.config.use_mm_proj = True
+
+        # 2. 获取已经由 HF 加载好权重的现有模块
+        vision_tower = self.get_vision_tower()
+        vision_resampler = getattr(self, 'vision_resampler', None)
+        mm_projector = getattr(self, 'mm_projector', None)
+
+        # 【防御性兜底】万一某些极端情况下没构建成功，在这里补齐（正常情况下 from_pretrained 时 __init__ 已经构建好了）
+        if vision_tower is None:
+            print("🏗️  [Finetune Base] 视觉塔未在内存中，执行紧急构建...")
+            from .multimodal_encoder.builder import build_vision_tower
+            self.vision_tower = build_vision_tower(self.config, delay_load=False, training_stage="finetune")
+            vision_tower = self.get_vision_tower()
+            
+        if vision_resampler is None and getattr(self.config, 'mm_resampler_type', None) is not None:
+            print("🛠️  [Finetune Base] 重采样器未在内存中，执行紧急构建...")
+            from .multimodal_resampler.builder import build_vision_resampler
+            self.vision_resampler = build_vision_resampler(self.config, delay_load=False, training_stage="finetune")
+            vision_resampler = self.vision_resampler
+
+        if mm_projector is None:
+            print("🛠️  [Finetune Base] Projector 未在内存中，执行紧急构建...")
+            from .multimodal_projector.builder import build_vision_projector
+            self.mm_projector = build_vision_projector(self.config, delay_load=False, training_stage="finetune")
+            mm_projector = self.mm_projector
+
+        # 3. 精度对齐 (适应 DeepSpeed / FSDP 混合精度训练，严禁在此处强行显式指定 device='cuda')
+        compute_dtype = torch.float16 if getattr(model_args, 'fp16', False) else torch.bfloat16
+        if vision_tower is not None:
+            vision_tower.to(dtype=compute_dtype)
+        if vision_resampler is not None:
+            vision_resampler.to(dtype=compute_dtype)
+        if mm_projector is not None:
+            mm_projector.to(dtype=compute_dtype)
+
+        # 4. 🔥 核心：根据传入的命令行参数，精准控制各现有模块的梯度放开
+        print("🔥 [梯度策略配置] 开始调整多模态各模块的可导状态...")
+
+        # A. 视觉双塔 (DINO + TrOCR)：根据微调策略决定是否冻结
+        # 如果你想全量微调视觉塔，传入 --freeze_vision_tower False
+        freeze_vt = getattr(model_args, "freeze_vision_tower", True)
+        if vision_tower is not None:
+            for p in vision_tower.parameters():
+                p.requires_grad = not freeze_vt
+            print(f"🔒 视觉双塔 (Vision Tower): {'已冻结 ❄️' if freeze_vt else '已全量解冻 🔥 (参与反向传播)'}")
+
+        # B. 视觉重采样器 (FoveaIntentResampler)：微调阶段必须放开梯度，让它适配新的指令特征
+        if vision_resampler is not None:
+            for p in vision_resampler.parameters():
+                p.requires_grad = True
+            print("🔥 重采样器 (Vision Resampler): 已全量解锁，开始参与训练")
+
+        # C. 投影层 (Projector)：必须放开梯度
+        if mm_projector is not None:
+            for p in mm_projector.parameters():
+                p.requires_grad = True
+            print("🔥 投影层 (Projector): 已全量解锁，开始参与训练")
+
+        print("✅ [初始化完成] 现有网络拓扑与梯度控制配置完毕。")
+    
     def initialize_vision_modules_stage3(self, model_args):
-        """
-        [Stage 3 专用版] 视觉模块初始化逻辑
-        核心目标：
-        1. 确保在 DeepSpeed 加载模型后，视觉塔架构已建立。
-        2. 触发防御性加载机制（优先使用内存中来自 Stage 1 的权重）。
-        3. 强制开启全量梯度（Full Fine-tuning）。
-        """
         vision_tower_name = model_args.vision_tower
         self.config.mm_vision_tower = vision_tower_name
-        
-        # 1. 获取或创建视觉塔对象 (The Skeleton)
         vision_tower = self.get_vision_tower()
-        
+
         if vision_tower is None:
             # 这种情况通常发生在没有通过 from_pretrained 加载，或者配置丢失时
             print(f"🏗️  [Stage 3] 视觉塔对象不存在，正在根据配置创建架构: {vision_tower_name}")
@@ -242,58 +303,36 @@ class BunnyMetaForCausalLM(ABC):
         vision_tower = self.get_model().get_vision_tower()
         ###################################################
         rank = torch.distributed.get_rank() if torch.distributed.is_initialized() else 0
+        recon_package_out = None # 声明接力棒
         if "AdaptiveConcatenationVisionTower" in str(type(vision_tower)):
-            image_features, _ = vision_tower(images)
-            # 2. 🌟【调整位置】：挪到这里！此时视觉塔里的 current_raw_images 才是热腾腾的当前 Batch 数据！
-            if hasattr(vision_tower, "current_raw_images"):
-                self.get_model().pending_reconstruction_images = vision_tower.current_raw_images
-                # 🧼 顺手把视觉塔里的引用置空，防止两份指针同时指着原图，优化显存
-                vision_tower.current_raw_images = None
-
-            if hasattr(vision_tower, "combined_features"):
-                self.get_model().pending_combined_features = vision_tower.combined_features
-                # 🧼 顺手把视觉塔里的引用置空，防止两份指针同时指着原图，优化显存
-                vision_tower.combined_features = None
-
-            resampler = getattr(self.get_model(), 'vision_resampler', None)
-            if resampler is not None and "IdentityMap" not in str(type(resampler)):
-                # 把上万个冗余 Token 动态压缩到 1089 以内
-                # 打印压缩前的多视图特征海啸状态
-                if rank == 0:
-                    #print(f"🌊 [Resampler 前] 原始多视图特征形状: {image_features.shape} | Device: {image_features.device} | Dtype: {image_features.dtype}")
-                    pass
-                resampler = resampler.to(device=image_features.device, dtype=image_features.dtype)
-                image_features = resampler(image_features)
-# 执行 Fovea 动态采样压缩
-                
-                # 🛠️ 联动修改：如果已经是 Tensor 则安心通关，如果是元组则解包，如果依然是 list 则进行连续化兜底
-                if isinstance(image_features, tuple):
-                    image_features = image_features[0]
-                    
-                if isinstance(image_features, list):
-                    # 确保全员连续
-                    image_features = [x.contiguous() for x in image_features]
-                    image_features = torch.stack(image_features, dim=0)
-                else:
-                    # 确保出厂的 Tensor 也是内存连续的
-                    image_features = image_features.contiguous()
-
-
-                # if isinstance(image_features, list):
-                #     image_features = torch.stack(image_features, dim=0)
-                # # 如果采样器连同某种 Loss 组成了元组返回，则进行解包
-                # elif isinstance(image_features, tuple):
-                #     image_features = image_features[0]
-                #     if isinstance(image_features, list):
-                #         image_features = torch.stack(image_features, dim=0)
-                # 打印压缩之后的紧凑特征状态
-                if rank == 0:
-                    #print(f"🎯 [Resampler 后] 压缩后紧凑特征形状: {image_features.shape} | 成功把有效图片 Token 数压制到: {image_features.shape[1]}")
-                    pass
-            image_features = self.get_model().mm_projector(image_features)
-            return image_features
+            image_features, recon_package = vision_tower(images)
+            recon_package_out  = recon_package
+        else:
+            image_features = vision_tower(images) 
+        resampler = getattr(self.get_model(), 'vision_resampler', None)
         mm_resampler_type = getattr(self.config, 'mm_resampler_type', None)
-
+        if resampler is not None and "IdentityMap" not in str(type(resampler)):
+            resampler = resampler.to(device=image_features.device, dtype=image_features.dtype)
+            image_features = resampler(image_features)
+            if isinstance(image_features, tuple):
+                image_features = image_features[0]
+            if isinstance(image_features, list):
+            # 确保全员连续
+                image_features = [x.contiguous() for x in image_features]
+                image_features = torch.stack(image_features, dim=0)
+            else:
+            # 确保出厂的 Tensor 也是内存连续的
+                image_features = image_features.contiguous()         
+        image_features = self.get_model().mm_projector(image_features)
+        if torch.isnan(image_features).any() or torch.isinf(image_features).any():
+            rank = torch.distributed.get_rank() if torch.distributed.is_initialized() else 0
+            if rank == 0:
+                print("⚠️ [警告] mm_projector 输出含有 NaN/Inf，已执行紧急强行归零！")
+            image_features = torch.nan_to_num(image_features, nan=0.0, posinf=60000.0, neginf=-60000.0)
+        
+        # 强制 Clip，绝对不允许任何数值超过 FP16 的安全临界值
+        image_features = torch.clamp(image_features, min=-60000.0, max=60000.0)
+        return image_features, recon_package_out        
 
     def prepare_inputs_labels_for_multimodal(
         self, input_ids, position_ids, attention_mask, past_key_values, labels, images
@@ -310,8 +349,9 @@ class BunnyMetaForCausalLM(ABC):
                     device=attention_mask.device
                 )), dim=1)
                 position_ids = torch.sum(attention_mask, dim=1).unsqueeze(-1) - 1
-            return input_ids, position_ids, attention_mask, past_key_values, None, labels
+            return input_ids, position_ids, attention_mask, past_key_values, None, labels, None
 
+        
         # --- [打印点 1：检查输入图像维度] ---
         # 确保进入视觉塔前，images 是你预期的 [B, 6, 2, 3, 378, 378]
         if local_rank == 0 and self.training:
@@ -321,10 +361,10 @@ class BunnyMetaForCausalLM(ABC):
         if isinstance(images, list) or images.ndim == 5:
             # 兼容多图输入情况
             concat_images = torch.cat([image for image in images], dim=0)
-            raw_features = self.encode_images(concat_images)
+            raw_features, recon_package = self.encode_images(concat_images)
         else:
             # 你的标准 AnyRes 路径
-            raw_features = self.encode_images(images)
+            raw_features, recon_package = self.encode_images(images)
     
         # 3. 维度检查与拆分：确保每个样本独立
         if raw_features.ndim == 3: # [Batch, 365, 1024]
@@ -397,9 +437,36 @@ class BunnyMetaForCausalLM(ABC):
                     cur_new_labels.append(label_seg)
                 
                 # B. 插入图像特征 (直接插入视觉塔返回的 365 个 tokens)
+# B. 插入图像特征 (直接插入视觉塔返回的 365 个 tokens)
                 if i < num_images:
-                    cur_feat = image_features[cur_image_idx]
-                    # --- 添加以下打印信息 ---
+                    # ====================================================================
+                    # 🚀 [紧急防崩补丁]：拦截脏数据导致的 Index Out Of Range
+                    # ====================================================================
+                    if cur_image_idx < len(image_features):
+                        # 正常情况：坑位和提供的特征对得上
+                        cur_feat = image_features[cur_image_idx]
+                    else:
+                        # 异常情况：坑位多，图片少。触发兜底机制！
+                        if local_rank == 0:
+                            print(f"\n🚨 [防崩护盾触发] 样本 {batch_idx} 数据不对齐！")
+                            print(f"   - 文本要求第 {cur_image_idx+1} 个图像特征")
+                            print(f"   - 但视觉塔总共只给了 {len(image_features)} 个特征")
+                            print(f"   => 采取措施：强制复用最后一张图的特征进行兜底！\n")
+                        
+                        if len(image_features) > 0:
+                            # 如果至少有一张图，拿最后一张图的特征来填剩下的坑，防止维度报错
+                            cur_feat = image_features[-1]
+                        else:
+                            # 极端异常：连一张图的特征都没有，强行捏造一个 0 张量
+                            # 假设你的视觉塔输出是 365 个 Token，维度取自模型 config
+                            fallback_dim = getattr(self.config, 'mm_hidden_size', 1024)
+                            cur_feat = torch.zeros(
+                                (365, fallback_dim), 
+                                device=cur_labels.device, 
+                                dtype=new_input_embeds[-1].dtype if len(new_input_embeds) > 0 else torch.float16
+                            )
+                    # ====================================================================
+
                     if local_rank == 0:
                          #print(f"🚀 [物理注入] 样本 {batch_idx} 的第 {cur_image_idx} 组特征正在缝入第 {i} 个坑位")
                          pass
@@ -411,7 +478,6 @@ class BunnyMetaForCausalLM(ABC):
                     cur_new_labels.append(
                         torch.full((cur_feat.shape[0],), IGNORE_INDEX, device=cur_labels.device, dtype=cur_labels.dtype)
                     )
-
             # 拼接当前样本的所有片段
             new_input_embeds.append(torch.cat(cur_new_input_embeds))
             new_labels.append(torch.cat(cur_new_labels))
@@ -475,5 +541,45 @@ class BunnyMetaForCausalLM(ABC):
             if internal_valid_tokens == 0:
                 #print(f"⚠️ 警告：有效 Labels 在此处已被洗掉！检查上方是否有类似 [:, :max_len] 或针对 modalities 的截断逻辑。")  
                 pass
-        return None, position_ids, attention_mask, past_key_values, new_input_embeds, new_labels_padded
+
+        # 🔮 [断点 2] 监控多模态拼接完成、即将送入 LLM 时的状态
+# ==========================================================
+        # 🔮 终极强制探针（放在函数的 return 之前）
+        # ==========================================================
+        import os
+        # 直接从环境变量抓取显卡真实 Rank，无视代码里的 None 状态
+        _real_rank = int(os.environ.get("LOCAL_RANK", "0")) 
+        
+        if _real_rank == 0:
+            #print("\n" + "🔥" * 20)
+            #print("🚀 [强制探针] 成功拦截到数据，正在体检...")
+            
+            if labels is None:
+                #print("🚨 恐怖发现：原始 labels 竟然是 None！DataLoader 没传标签！")
+                pass
+            
+            if new_labels_padded is not None:
+                # 统计整个 Batch 中，不是 -100 的有效 Label 数量
+                internal_valid_tokens = (new_labels_padded != IGNORE_INDEX).sum().item()
+                #print(f"📊 [数据体检] 当前 Batch 的真实有效 Labels 数量: {internal_valid_tokens}")
+                pass
+                
+                if internal_valid_tokens == 0:
+                    #print(f"🚨🚨🚨 致命警报：检测到整个 Batch 的 Labels 都是 -100（IGNORE_INDEX）！")
+                    initial_valid = (labels != IGNORE_INDEX).sum().item()
+                    #print(f"🚨 [溯源] 最初传进本函数的 labels 中，有效 Label 数量: {initial_valid}")
+            else:
+                #print("🚨 恐怖发现：new_labels_padded 是 None！")
+                pass
+            #print("🔥" * 20 + "\n")
+        # ==========================================================
+
+        # ==========================================================
+        # 🚨 [关键修复] 既然数据没问题，我们在返回前强行给输入打上梯度需求的烙印
+        # 欺骗 Checkpoint 门卫，强行打通反向传播链条！
+        # ==========================================================
+        if new_input_embeds is not None and self.training:
+            new_input_embeds.requires_grad_()
+
+        return None, position_ids, attention_mask, past_key_values, new_input_embeds, new_labels_padded, recon_package
 

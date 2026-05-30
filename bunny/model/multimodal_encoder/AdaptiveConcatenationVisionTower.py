@@ -78,8 +78,8 @@ class AdaptiveConcatenationVisionTower(nn.Module):
         self.dino_vision_tower = DinoVisionTower(args.vision_tower_dino, args, **kwargs)
         self.trocr_vision_tower = TrOCRVisionTower(args.vision_tower_trocr, args, **kwargs)
         self.image_processor = ImageProcessorMultipleEncoders(target_size=384)
-        self.current_raw_images = None  #为了后面的重构损失
-        self.combined_features =None #为了后面的重构损失
+        #self.current_raw_images = None  #为了后面的重构损失
+        #self.combined_features =None #为了后面的重构损失
         self._hidden_size = 768  #明确输出这个塔
         self.shared_aligner = SharedFeatureFusionAligner(dim=768, intermediate_dim=1024) # 选项：1024 或 1536
         if not kwargs.get('delay_load', False):
@@ -115,10 +115,10 @@ class AdaptiveConcatenationVisionTower(nn.Module):
         combined_per_crop = torch.cat([dino_gallery, trocr_gallery], dim=1)  #这个返回的是torch.Size([B*6, 2308*2, 768])
         
         #self.current_raw_images = images  # 这个用于解码器的重构损失计算，形状是[B, 6, 2, 3, 384, 384])
-        self.current_raw_images = images[:, :, 0].view(-1, c, h, w) #这个用于解码器的重构损失计算,可以只选dino的部分 [B*6, 3, 384, 384] 
+        current_raw_images = images[:, :, 0].view(-1, c, h, w) #这个用于解码器的重构损失计算,可以只选dino的部分 [B*6, 3, 384, 384] 
         shared_features = self.shared_aligner(combined_per_crop)
         self.combined_features = shared_features  #torch.Size([B*6, 2308*2, 768])
-        return shared_features,None  #返回的是 torch.Size([B*6, 2308*2, 768])
+        return shared_features,(current_raw_images, shared_features)  #返回的是 torch.Size([B*6, 2308*2, 768])
 
     def load_model(self):
         if self.is_loaded:

@@ -182,6 +182,7 @@ def train():
     model.config.unfreeze_mm_vision_tower = model_args.unfreeze_mm_vision_tower
     model.config.vision_tower_dino = model_args.vision_tower_dino
     model.config.vision_tower_siglip = model_args.vision_tower_siglip
+    model.config.vision_tower_trocr = model_args.vision_tower_trocr
     model.config.mm_projector_type = model_args.mm_projector_type
     model.config.model_type = model_args.model_type
     model.config.lora_enable = training_args.lora_enable

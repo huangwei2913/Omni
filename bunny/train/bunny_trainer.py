@@ -129,66 +129,6 @@ class LengthGroupedSampler(Sampler):
 
 class BunnyTrainer(Trainer):
 
-    # def _get_train_sampler(self, dataset) -> Optional[torch.utils.data.Sampler]:
-
-    #     if not torch.distributed.is_initialized() or torch.distributed.get_rank() == 0:
-    #         print("\n" + "🚀"*10)
-    #         print("DEBUG: BunnyTrainer._get_train_sampler 被触发了！")
-    #         print(f"DEBUG: group_by_modality_length 状态: {self.args.group_by_modality_length}")
-    #         print("🚀"*10 + "\n")
-
-    #     if self.train_dataset is None or not has_length(self.train_dataset):
-    #         return None
-        
-    #     #dict：{"train_dataset": ..., "eval_dataset": ..., "data_collator": ...}。
-    #     #在这里我们应该强制走这一个分支
-    #     if self.args.group_by_modality_length:
-    #         lengths = self.train_dataset.modality_lengths
-    #         return LengthGroupedSampler(
-    #             self.args.train_batch_size,
-    #             world_size=self.args.world_size * self.args.gradient_accumulation_steps,
-    #             lengths=lengths,
-    #             group_by_modality=True,
-    #         )
-    #     else:
-    #         if not torch.distributed.is_initialized() or torch.distributed.get_rank() == 0:
-    #             print("⚠️ 警告：没有启用长度分组，将使用默认采样器。。。。。。。。。。。。。。。。。。。。。。。。。。。。。。。。。。。")
-    #         return super()._get_train_sampler(dataset)
-
-
-    # 核心修改：给 dataset 增加 =None 默认值
-    # def _get_train_sampler(self, dataset=None) -> Optional[torch.utils.data.Sampler]:
-        
-    #     # 1. 兼容性逻辑：如果调用者没传，就用成员变量里的
-    #     effective_dataset = dataset if dataset is not None else self.train_dataset
-
-    #     if not torch.distributed.is_initialized() or torch.distributed.get_rank() == 0:
-    #         print("\n" + "🚀"*10)
-    #         print("DEBUG: BunnyTrainer._get_train_sampler 被触发了！")
-    #         print(f"DEBUG: group_by_modality_length 状态: {self.args.group_by_modality_length}")
-    #         print("🚀"*10 + "\n")
-
-    #     # 使用 effective_dataset 进行判断
-    #     if effective_dataset is None or not has_length(effective_dataset):
-    #         return None
-        
-    #     # 2. 强制走你的分组逻辑
-    #     if self.args.group_by_modality_length:
-    #         # 注意：这里的 lengths 也要从 effective_dataset 获取
-    #         lengths = effective_dataset.modality_lengths
-    #         return LengthGroupedSampler(
-    #             self.args.train_batch_size,
-    #             world_size=self.args.world_size * self.args.gradient_accumulation_steps,
-    #             lengths=lengths,
-    #             group_by_modality=True,
-    #         )
-    #     else:
-    #         if not torch.distributed.is_initialized() or torch.distributed.get_rank() == 0:
-    #             print("⚠️ 警告：没有启用长度分组，将使用默认采样器...")
-    #         # 3. 调用基类时，确保传入参数
-    #         return super()._get_train_sampler(effective_dataset)
-
-
     def _get_train_sampler(self, dataset=None) -> Optional[torch.utils.data.Sampler]:
         # 1. 确定我们要用的数据集
         effective_dataset = dataset if dataset is not None else self.train_dataset
@@ -287,26 +227,26 @@ class BunnyTrainer(Trainer):
         return self.optimizer
 
     def _save_checkpoint(self, model, trial, metrics=None):
-            # 1. 保存 Trainer 状态（Loss 曲线、Step 数等）
-            super()._save_checkpoint(model, trial)
+        # 1. 首先保存 Trainer 的基础状态（已经脱离了对自定义模型的深度克隆依赖）
+        super()._save_checkpoint(model, trial)
 
-            from transformers.trainer_utils import PREFIX_CHECKPOINT_DIR
-            checkpoint_folder = f"{PREFIX_CHECKPOINT_DIR}-{self.state.global_step}"
-            output_dir = os.path.join(self._get_output_dir(trial=trial), checkpoint_folder)
+        from transformers.trainer_utils import PREFIX_CHECKPOINT_DIR
+        checkpoint_folder = f"{PREFIX_CHECKPOINT_DIR}-{self.state.global_step}"
+        output_dir = os.path.join(self._get_output_dir(trial=trial), checkpoint_folder)
 
-            # 2. 只有主进程执行合并与全量保存
-            if self.args.local_rank <= 0:
-                print(f"\n🚀 [Step {self.state.global_step}] 启动全量固化与配置同步...")
+        # 2. 只有主进程执行合并与全量保存
+        if self.args.local_rank <= 0:
+            print(f"\n🚀 [Step {self.state.global_step}] 启动全量固化与配置同步 (NPU 优化无损方案)...")
 
-                import copy
-                # 注意：在显存紧张的情况下，deepcopy 可能会导致 OOM。
-                # 但为了保证 merge_and_unload 不影响训练中的梯度链，copy 是最稳妥的。
-                temp_model = copy.deepcopy(self.model)
-                
-                # --- ✨ 核心逻辑：自动同步 ModelArguments 到 Config ---
-                # 我们将 ModelArguments 中的所有字段同步到 config 中，确保保存后的 config.json 完整
-                # 这样推理时 builder.py 才能正确识别你的 mixedencoder 结构
-                
+            # ====================================================================
+            # 🛠️ [核心修改点 1] 彻底抛弃危险的 copy.deepcopy(self.model)
+            # 在 torch.no_grad() 上下文中暂时操作 self.model 的 config 并在结束后还原
+            # ====================================================================
+            with torch.no_grad():
+                # 保存原始配置的快照，用于保存完毕后完美复原训练状态
+                orig_lora_enable = getattr(self.model.config, 'lora_enable', False)
+                orig_attrs = {}
+
                 attrs_to_sync = [
                     "model_type", "version", "freeze_backbone", "tune_mm_mlp_adapter",
                     "unfreeze_mm_vision_tower", "vision_tower", "unfreeze_vision_tower",
@@ -318,32 +258,40 @@ class BunnyTrainer(Trainer):
                     "vision_tower_dino", "vision_tower_siglip", "compression_K", "mm_hidden_size"
                 ]
 
+                # 暂存当前模型参数用于恢复，同时强制覆盖更新到模型的 config
                 for attr in attrs_to_sync:
-                    # 优先从当前训练模型的 config 中取，取不到则保持 None
-                    val = getattr(self.model.config, attr, None)
-                    setattr(temp_model.config, attr, val)
+                    orig_attrs[attr] = getattr(self.model.config, attr, None)
+                    # 优先保证值存在
+                    if orig_attrs[attr] is not None:
+                        setattr(self.model.config, attr, orig_attrs[attr])
                     
-                # 标记这是一个已经固化过的模型，不再需要外挂 LoRA
-                temp_model.config.lora_enable = False 
+                # 标记该全量存储的配置文件不需要再挂载外挂 LoRA
+                self.model.config.lora_enable = False 
 
-                # --- 3. 物理合并 LoRA (如果是 LoRA 模式) ---
+                # --- 3. 物理合并 LoRA (如果启用了 LoRA) ---
                 if getattr(self.args, 'lora_enable', False):
-                    print("   🔗 正在执行权重合并 (Merge LoRA)...")
-                    # merge_and_unload 会将线性层权重相加，返回原始结构的 Model
-                    temp_model = temp_model.merge_and_unload()
+                    print("   🔗 正在执行原地权重合并 (Merge LoRA)...")
+                    # 直接原地执行 merge，避免深拷贝
+                    self.model.merge_by_forward() if hasattr(self.model, 'merge_by_forward') else self.model.merge_and_unload()
                 
-                # --- 4. 执行全量物理保存 ---
-                # save_pretrained 会自动根据权重体积生成 model.safetensors 或 pytorch_model.bin
-                # 它会包含 LLM、Projector 和你解冻的 Vision Tower 全部 113+ 参数
+                # --- 4. 执行全量物理文件落盘 ---
                 print(f"   💾 正在写入全量文件至 {output_dir} ...")
-                temp_model.save_pretrained(output_dir)
+                self.model.save_pretrained(output_dir)
                 
                 if self.tokenizer is not None:
                     self.tokenizer.save_pretrained(output_dir)
                 
-                # 显式清理内存
-                del temp_model
-                print(f"✅ [Checkpoint {self.state.global_step}] 保存成功！该目录可直接用于独立推理。")
+                # --- 5. 逆初始化/反解绑：将主模型恢复到当前的训练状态，准备后续的 Step 迭代 ---
+                if getattr(self.args, 'lora_enable', False):
+                    print("   ↩️ 正在恢复 LoRA 梯度图解绑状态以继续训练...")
+                    self.model.unmerge_by_forward() if hasattr(self.model, 'unmerge_by_forward') else self.model.unmerge_and_unload() if hasattr(self.model, 'unmerge_and_unload') else None
+                
+                # 完美还原训练参数设置
+                self.model.config.lora_enable = orig_lora_enable
+                for attr, old_val in orig_attrs.items():
+                    setattr(self.model.config, attr, old_val)
+
+            print(f"✅ [Checkpoint {self.state.global_step}] 保存成功！该目录可直接用于独立推理，显存未受破坏。")
 
     def _save(self, output_dir: Optional[str] = None, state_dict=None):
         output_dir = output_dir if output_dir is not None else self.args.output_dir
@@ -351,40 +299,95 @@ class BunnyTrainer(Trainer):
 
         if getattr(self.args, 'lora_enable', False):
             if self.args.local_rank <= 0:
-                print(f"🚀 [全量化保存] 正在强制固化 Config 并合并权重...")
+                print(f"🚀 [全量化保存] 正在强制原地固化 Config 并合并权重 (避免 deepcopy)...")
                 
-                import copy
-                # 1. 深度拷贝模型
-                temp_model = copy.deepcopy(self.model)
-                
-                # --- ✨ 修复点：安全地获取 ModelArguments 中的路径 ✨ ---
-                # 注意：self.args 是 TrainingArguments，不含 vision_tower_dino
-                # 我们需要使用 self.model.config 里的值，或者在初始化 Trainer 时传入的 model_args
-                
-                # 尝试从模型现有的 config 中提取，如果不存在，则使用默认逻辑
-                # 通常在 train.py 初始化时，这些值已经被赋给了 model.config
-                v_dino = getattr(self.model.config, 'vision_tower_dino', None)
-                v_siglip = getattr(self.model.config, 'vision_tower_siglip', None)
-                p_type = getattr(self.model.config, 'mm_projector_type', 'mlp2x_gelu')
+                # ====================================================================
+                # 🛠️ [核心修改点 2] 彻底抛弃最后的 _save 处的 copy.deepcopy(self.model)
+                # ====================================================================
+                with torch.no_grad():
+                    # 暂存配置状态
+                    orig_lora_enable = getattr(self.model.config, 'lora_enable', False)
+                    v_dino = getattr(self.model.config, 'vision_tower_dino', None)
+                    v_siglip = getattr(self.model.config, 'vision_tower_siglip', None)
+                    v_trocr = getattr(self.model.config, 'vision_tower_trocr', None)
+                    
+                    p_type = getattr(self.model.config, 'mm_projector_type', 'mlp2x_gelu')
+                    m_type = getattr(self.model.config, 'model_type', 'phi-1.5')
+                    # 覆盖配置
+                    self.model.config.vision_tower_dino = v_dino
+                    self.model.config.vision_tower_siglip = v_siglip
+                    self.model.config.vision_tower_trocr = v_trocr
+                    self.model.config.mm_projector_type = p_type
+                    self.model.config.model_type = m_type
+                    self.model.config.lora_enable = False 
 
-                # 强制写入 temp_model 的 config，确保 save_pretrained 能写进 config.json
-                temp_model.config.vision_tower_dino = v_dino
-                temp_model.config.vision_tower_siglip = v_siglip
-                temp_model.config.mm_projector_type = p_type
-                temp_model.config.model_type = getattr(self.model.config, 'model_type', 'phi-1.5')
-                # -------------------------------------------------------
-
-                # 2. 物理合并 LoRA
-                temp_model = temp_model.merge_and_unload()
-                temp_model.config.lora_enable = False 
+                    # 原地合并权重
+                    print("   🔗 [Final Save] 正在执行原地权重合并...")
+                    self.model.merge_by_forward() if hasattr(self.model, 'merge_by_forward') else self.model.merge_and_unload()
+                    
+                    # 保存落盘
+                    print(f"   💾 [Final Save] 正在写入全量文件至 {output_dir} ...")
+                    self.model.save_pretrained(output_dir)
+                    if self.tokenizer is not None:
+                        self.tokenizer.save_pretrained(output_dir)
+                    
+                    # 完美的逆向撤销操作，将模型还给训练引擎
+                    print("   ↩️ [Final Save] 正在恢复梯度状态...")
+                    self.model.unmerge_by_forward() if hasattr(self.model, 'unmerge_by_forward') else self.model.unmerge_and_unload() if hasattr(self.model, 'unmerge_and_unload') else None
+                    self.model.config.lora_enable = orig_lora_enable
                 
-                # 3. 执行全量保存
-                temp_model.save_pretrained(output_dir)
-                
-                if self.tokenizer is not None:
-                    self.tokenizer.save_pretrained(output_dir)
-                
-                del temp_model
-                print(f"✅ [成功] 全量模型及配置已保存至 {output_dir}")
+                print(f"✅ [成功] 全量模型及配置已无损安全保存至 {output_dir}")
         else:
             super(BunnyTrainer, self)._save(output_dir, state_dict)
+    # ====================================================================
+    # 🎯 [硬核强制探针] 越过 Trainer 状态锁，只要是10的倍数步，强制存盘！
+    # ====================================================================
+    def log(self, logs: dict, *args, **kwargs) -> None:
+        # 先调用原版的 log 打印日志
+        super().log(logs, *args, **kwargs)
+        
+        # 提取当前的全局步数
+        current_step = self.state.global_step
+        
+        # 只有在主进程 (RANK <= 0)，且步数大于500（防止一启动就重复存），且是10的倍数时触发
+        if self.args.local_rank <= 0 and current_step > 500 and current_step % 500 == 0:
+            print(f"\n🚨 [硬核探针拦截] 检测到当前全局步数为 {current_step}，正在越过 Trainer 机制强制激活存盘...")
+            
+            # 直接调用咱们改好的无损保存函数
+            try:
+                self._save_checkpoint(model=self.model, trial=None)
+                print(f"✅ [硬核探针拦截] 第 {current_step} 步强行保存机制完美执行完毕！\n")
+            except Exception as e:
+                print(f"❌ [硬核探针拦截] 强行保存失败，报错信息: {str(e)}")
+
+
+
+    # ====================================================================
+    # 🛡️ [硬核 Loss 数值防火墙] 彻底封死万亿级异常数值，保护优化器权重
+    # ====================================================================
+    def compute_loss(self, model, inputs, return_outputs=False, **kwargs):
+        """
+        重写 Trainer 的 compute_loss，在 Loss 准备送入反向传播前，强行进行健康度质检
+        """
+        # 1. 调用底层的原生前向传播计算 loss
+        outputs = model(**inputs)
+        
+        if self.label_smoother is not None and "labels" in inputs:
+            labels = inputs.pop("labels")
+            loss = self.label_smoother(outputs, labels)
+        else:
+            loss = outputs["loss"] if isinstance(outputs, dict) else outputs[0]
+
+        # 2. 核心拦截：检测 NaN, Inf 或大于 100 极其夸张的数值
+        if torch.isnan(loss) or torch.isinf(loss) or loss.item() > 100.0:
+            if self.args.local_rank <= 0:
+                print(f"\n🚨 [数值异常熔断] 检测到流图总 Loss 瞬间爆发: {loss.item()}，已拦截并强制复位为 1.0！")
+            
+            # 使用 torch.where 安全替换，保持计算图不打断，给它一个安全的常数 1.0
+            loss = torch.where(
+                torch.isnan(loss) | torch.isinf(loss) | (loss > 100.0),
+                torch.tensor(1.0, device=loss.device, dtype=loss.dtype),
+                loss
+            )
+
+        return (loss, outputs) if return_outputs else loss

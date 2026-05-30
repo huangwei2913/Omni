@@ -22,8 +22,30 @@ class FluxSmallDecoder(nn.Module):
             act_fn=config.get("decoder_act_fn", "silu"),
         )
 
+    # def decode(self, z):
+    #     # FLUX.2 可能会对 latent 进行缩放
+    #     z = z / self.config.get("scaling_factor", 0.3611)
+    #     dec = self.decoder(z)
+    #     return dec
+
     def decode(self, z):
-        # FLUX.2 可能会对 latent 进行缩放
-        z = z / self.config.get("scaling_factor", 0.3611)
+        # =======================================================
+        # 🚀 [昇腾 NPU 专属护盾] 
+        # =======================================================
+        # 1. 强制内存连续化（解决 Reshape 带来的底层访存越界崩溃）
+        z = z.contiguous()
+        
+        # 2. 铲除脏数据（防止 NPU 因遇到 Inf/NaN 直接段错误崩溃）
+        if torch.isnan(z).any() or torch.isinf(z).any():
+            z = torch.nan_to_num(z, nan=0.0, posinf=65500.0, neginf=-65500.0)
+            
+        # 3. 强制精度对齐（让 z 的精度和 VAE 卷积层的权重精度绝对一致）
+        # 获取 decoder 内部权重的真实 dtype (可能是 float32 或 float16)
+        target_dtype = next(self.decoder.parameters()).dtype
+        z = z.to(dtype=target_dtype)
+        # =======================================================
+
+        # 原始的 diffusers 解码调用
         dec = self.decoder(z)
+        
         return dec
